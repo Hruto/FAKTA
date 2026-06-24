@@ -10,6 +10,15 @@ import sqlite3
 from typing import List, Dict, Optional
 from hashlib import sha256
 from datetime import datetime, timedelta
+from pathlib import Path
+
+# Load .env file
+try:
+    from dotenv import load_dotenv
+    _env_path = Path(__file__).parent.parent.parent / ".env"
+    load_dotenv(dotenv_path=_env_path)
+except ImportError:
+    pass
 
 
 class EvidenceCache:

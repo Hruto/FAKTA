@@ -4,15 +4,31 @@ REST API for the FAKTA fact-checking system.
 """
 
 import os
+import sys
 import time
+import json
 import logging
 from typing import Optional
 from pathlib import Path
 
+# Load .env file BEFORE any component that reads env vars
+try:
+    from dotenv import load_dotenv
+    env_path = Path(__file__).parent.parent.parent / ".env"
+    load_dotenv(dotenv_path=env_path)
+except ImportError:
+    # python-dotenv not installed — fall back to system env
+    pass
+
+# Ensure project root is on sys.path so src/ submodules can be imported
+PROJECT_ROOT = Path(__file__).parent.parent.parent
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 
-from schemas import (
+from src.api.schemas import (
     CheckRequest, CheckResponse, ClaimResult,
     FeedbackRequest, FeedbackResponse, HealthResponse,
 )
@@ -62,11 +78,9 @@ class FAKTAPipeline:
         logger.info("Initializing FAKTA pipeline...")
 
         # Preprocessing
-        import sys
-        sys.path.insert(0, str(Path(__file__).parent.parent))
-        from preprocessing.cleaning import clean_text
-        from preprocessing.slang_normalizer import normalize_slang
-        from preprocessing.feature_extractor import extract_features
+        from src.preprocessing.cleaning import clean_text
+        from src.preprocessing.slang_normalizer import normalize_slang
+        from src.preprocessing.feature_extractor import extract_features
         self._preprocessor = {
             "clean": clean_text,
             "normalize": normalize_slang,
@@ -74,31 +88,31 @@ class FAKTAPipeline:
         }
 
         # Claim extraction
-        from claim_extraction.gemini_extractor import GeminiClaimExtractor
+        from src.claim_extraction.gemini_extractor import GeminiClaimExtractor
         self._claim_extractor = GeminiClaimExtractor()
 
         # Evidence retrieval
-        from evidence.retriever import HybridRetriever
+        from src.evidence.retriever import HybridRetriever
         self._retriever = HybridRetriever()
 
-        from evidence.factcheck_api import GoogleFactCheckAPI
+        from src.evidence.factcheck_api import GoogleFactCheckAPI
         self._factcheck_api = GoogleFactCheckAPI()
 
-        from evidence.wikipedia_fallback import WikipediaFallback
+        from src.evidence.wikipedia_fallback import WikipediaFallback
         self._wikipedia = WikipediaFallback()
 
         # LLM Judge
-        from judge.gemini_evidence_judge import GeminiEvidenceJudge
+        from src.judge.gemini_evidence_judge import GeminiEvidenceJudge
         self._judge = GeminiEvidenceJudge()
 
         # Cache
-        from evidence.cache import EvidenceCache
+        from src.evidence.cache import EvidenceCache
         self._cache = EvidenceCache()
 
         # LSTM (optional — may not be trained yet)
         model_path = "models/lstm/lstm_model.keras"
         if os.path.exists(model_path):
-            from classifier.lstm_model import LSTMPredictor
+            from src.classifier.lstm_model import LSTMPredictor
             self._lstm_predictor = LSTMPredictor(model_path)
             logger.info("LSTM model loaded")
         else:
@@ -196,7 +210,7 @@ class FAKTAPipeline:
                 evidence_sources = []
 
             # Fusion
-            from fusion.confidence_fusion import (
+            from src.fusion.confidence_fusion import (
                 fuse_claim_verdict, compute_evidence_quality,
             )
             evidence_quality = compute_evidence_quality(evidence)
@@ -225,7 +239,7 @@ class FAKTAPipeline:
             ))
 
         # Step 4: Article aggregation
-        from fusion.aggregation import (
+        from src.fusion.aggregation import (
             aggregate_article_verdicts, ClaimVerdict,
         )
 

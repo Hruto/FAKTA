@@ -151,10 +151,18 @@ class LSTMPredictor:
     def _load_tokenizer(self, model_path: str):
         """Load the tokenizer saved alongside the model."""
         import pickle
-        tokenizer_path = model_path.replace(".keras", "_tokenizer.pkl").replace(".h5", "_tokenizer.pkl")
-        if os.path.exists(tokenizer_path):
-            with open(tokenizer_path, "rb") as f:
-                self.tokenizer = pickle.load(f)
+        model_dir = os.path.dirname(model_path)
+        # Try multiple possible tokenizer paths
+        candidates = [
+            os.path.join(model_dir, "tokenizer.pkl"),
+            model_path.replace(".keras", "_tokenizer.pkl"),
+            model_path.replace(".h5", "_tokenizer.pkl"),
+        ]
+        for tokenizer_path in candidates:
+            if os.path.exists(tokenizer_path):
+                with open(tokenizer_path, "rb") as f:
+                    self.tokenizer = pickle.load(f)
+                return
 
     def predict(self, text: str) -> Dict[str, float]:
         """

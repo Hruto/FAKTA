@@ -5,10 +5,22 @@ LLM reads claim + evidence and produces a verdict: Supported / Refuted / NotEnou
 
 import json
 import os
+import logging
 from typing import List, Dict, Optional
 from dataclasses import dataclass, asdict
 import hashlib
 import re
+
+# Load .env file
+try:
+    from pathlib import Path
+    from dotenv import load_dotenv
+    _env_path = Path(__file__).parent.parent.parent / ".env"
+    load_dotenv(dotenv_path=_env_path)
+except ImportError:
+    pass
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -151,10 +163,18 @@ Output HARUS dalam format JSON:
             confidence = max(0.0, min(1.0, confidence))
 
             # Get evidence text for used indices
+            # LLM may return 0-based or 1-based indices; handle both safely
             used_texts = []
             for idx in evidence_used:
-                if isinstance(idx, int) and 0 <= idx - 1 < len(evidence_list):
-                    used_texts.append(evidence_list[idx - 1].get("text", ""))
+                if isinstance(idx, (int, float)):
+                    idx = int(idx)
+                    # Try 1-based first (idx-1), then 0-based (idx)
+                    for candidate in [idx - 1, idx]:
+                        if 0 <= candidate < len(evidence_list):
+                            t = evidence_list[candidate].get("text", "")
+                            if t and t not in used_texts:
+                                used_texts.append(t)
+                            break
 
             return JudgeResult(
                 claim_id=claim_id,

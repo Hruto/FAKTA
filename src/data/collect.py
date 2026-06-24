@@ -29,12 +29,12 @@ from bs4 import BeautifulSoup
 
 class TurnBackHoaxScraper:
     """
-    Scrapes TurnBackHoax.id for hoax fact-check articles.
-    Respects rate limiting (1 req / 2 seconds).
+    Scrapes TurnBackHoax.id for hoax fact-check articles using their API.
+    Much faster than HTML scraping.
     """
 
-    BASE_URL = "https://turnbackhoax.id"
-    RATE_LIMIT = 2.0  # seconds between requests
+    API_URL = "https://turnbackhoax.id/api/articles"
+    RATE_LIMIT = 0.5  # seconds between requests
 
     def __init__(self, output_dir: str = "data/raw/turnbackhoax"):
         self.output_dir = Path(output_dir)
@@ -48,113 +48,54 @@ class TurnBackHoaxScraper:
             time.sleep(self.RATE_LIMIT - elapsed)
         self._last_request = time.time()
 
-    def scrape_page(self, page: int = 1) -> List[Dict]:
-        """Scrape a single page of articles."""
+    def fetch_page(self, page: int = 1, limit: int = 100) -> List[Dict]:
+        """Fetch a single page from the API."""
         self._wait()
-        url = f"{self.BASE_URL}/page/{page}/"
-
         try:
-            response = requests.get(url, timeout=15, headers={
-                "User-Agent": "FAKTA Academic Research Bot (contact: research@fakta.id)"
-            })
-            response.raise_for_status()
-
-            soup = BeautifulSoup(response.text, "lxml")
-            articles = []
-
-            # TurnBackHoax uses WordPress theme
-            for article in soup.find_all("article"):
-                title_el = article.find("h2", class_="entry-title")
-                if not title_el:
-                    continue
-
-                title = title_el.get_text(strip=True)
-                link_el = title_el.find("a")
-                url = link_el["href"] if link_el else ""
-
-                excerpt_el = article.find("div", class_="entry-excerpt")
-                excerpt = excerpt_el.get_text(strip=True) if excerpt_el else ""
-
-                date_el = article.find("time")
-                date = date_el.get("datetime", "") if date_el else ""
-
-                if title and url:
-                    articles.append({
-                        "title": title,
-                        "url": url,
-                        "excerpt": excerpt,
-                        "date": date[:10] if date else "",
-                        "source": "TurnBackHoax",
-                        "source_tier": 3,
-                    })
-
-            return articles
-
+            response = requests.get(
+                self.API_URL,
+                params={"page": page, "limit": limit},
+                timeout=15,
+                headers={"User-Agent": "FAKTA Academic Research Bot"},
+                verify=False,
+            )
+            if response.status_code != 200:
+                return []
+            data = response.json()
+            if not data.get("success"):
+                return []
+            return data.get("data", [])
         except Exception as e:
-            print(f"[TurnBackHoax] Error scraping page {page}: {e}")
+            print(f"[TurnBackHoax] Error fetching page {page}: {e}")
             return []
 
-    def scrape_article_detail(self, url: str) -> Optional[Dict]:
-        """Scrape full article content from URL."""
-        self._wait()
-
-        try:
-            response = requests.get(url, timeout=15, headers={
-                "User-Agent": "FAKTA Academic Research Bot"
-            })
-            response.raise_for_status()
-
-            soup = BeautifulSoup(response.text, "lxml")
-
-            # Get content
-            content_el = soup.find("div", class_="entry-content")
-            content = content_el.get_text("\n", strip=True) if content_el else ""
-
-            # Get category
-            categories = []
-            for cat in soup.find_all("a", rel="category"):
-                categories.append(cat.get_text(strip=True))
-
-            return {
-                "content": content,
-                "categories": categories,
-                "full_text": content[:2000],  # Limit for training
-            }
-
-        except Exception as e:
-            print(f"[TurnBackHoax] Error fetching {url}: {e}")
-            return None
-
-    def scrape(self, max_pages: int = 50, include_details: bool = False) -> List[Dict]:
+    def scrape(self, max_pages: int = 150, limit_per_page: int = 10) -> List[Dict]:
         """
-        Scrape multiple pages.
+        Scrape articles from the API.
 
         Args:
-            max_pages: Maximum number of pages to scrape
-            include_details: Whether to fetch full article content
+            max_pages: Maximum number of pages to fetch
+            limit_per_page: Items per page (API default is 10)
 
         Returns:
-            List of article dicts
+            List of article dicts with title, description, content, conclusion
         """
         all_articles = []
 
         for page in range(1, max_pages + 1):
-            print(f"Scraping page {page}/{max_pages}...")
-            articles = self.scrape_page(page)
+            print(f"Fetching page {page}/{max_pages}...", end=" ", flush=True)
+            articles = self.fetch_page(page, limit_per_page)
 
             if not articles:
-                print(f"No more articles found at page {page}")
+                print("No more articles.")
                 break
 
-            if include_details:
-                for i, article in enumerate(articles):
-                    print(f"  Fetching detail {i+1}/{len(articles)}: {article['title'][:50]}...")
-                    detail = self.scrape_article_detail(article["url"])
-                    if detail:
-                        article.update(detail)
-
             all_articles.extend(articles)
-            print(f"  Collected {len(articles)} articles from page {page}")
+            print(f"Got {len(articles)} articles (total: {len(all_articles)})")
+
+            # Stop if we got fewer than limit (last page)
+            if len(articles) < limit_per_page:
+                break
 
         # Save raw
         output_path = self.output_dir / "raw_articles.json"
@@ -202,29 +143,44 @@ class CekFaktaScraper:
 # Dataset Normalization
 # ============================================================
 
+import re
+
+def strip_html(html: str) -> str:
+    """Remove HTML tags from text."""
+    if not html:
+        return ""
+    return re.sub(r"<[^>]+>", "", html).strip()
+
+
 def normalize_turnbackhoax(raw_articles: List[Dict]) -> pd.DataFrame:
     """
-    Normalize TurnBackHoax raw data to training format.
+    Normalize TurnBackHoax API data to training format.
 
     Output columns: text, claim, label, source, date, url
     """
     records = []
 
     for article in raw_articles:
-        text = article.get("full_text") or article.get("content") or article.get("excerpt", "")
-        claim = article.get("title", "")
+        # Build full text from description + conclusion (debunk info)
+        description = strip_html(article.get("description", ""))
+        conclusion = strip_html(article.get("conclusion", ""))
+        content = strip_html(article.get("content", ""))
+        title = article.get("title", "")
+
+        # Combine into training text
+        text = f"{title}\n{description}\n{conclusion}".strip()
 
         # All TurnBackHoax articles are debunked hoaks
         label = "hoax"
 
         records.append({
             "text": text,
-            "claim": claim,
+            "claim": title,
             "label": label,
             "source": "TurnBackHoax",
-            "date": article.get("date", ""),
-            "url": article.get("url", ""),
-            "category": ", ".join(article.get("categories", [])),
+            "date": article.get("created_at", "")[:10] if article.get("created_at") else "",
+            "url": f"https://turnbackhoax.id/articles/{article.get('slug', '')}",
+            "category": article.get("category", ""),
         })
 
     df = pd.DataFrame(records)
@@ -312,7 +268,7 @@ def main():
     # Step 1: Scrape TurnBackHoax
     print("\n[1/3] Scraping TurnBackHoax...")
     tbh_scraper = TurnBackHoaxScraper()
-    tbh_articles = tbh_scraper.scrape(max_pages=50, include_details=False)
+    tbh_articles = tbh_scraper.scrape(max_pages=100)
 
     # Step 2: Normalize
     print("\n[2/3] Normalizing datasets...")

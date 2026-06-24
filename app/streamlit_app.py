@@ -9,6 +9,14 @@ import json
 import time
 from pathlib import Path
 
+# Load .env file
+try:
+    from dotenv import load_dotenv
+    _env_path = Path(__file__).parent.parent / ".env"
+    load_dotenv(dotenv_path=_env_path)
+except ImportError:
+    pass
+
 import streamlit as st
 import requests
 

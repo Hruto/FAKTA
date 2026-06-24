@@ -14,6 +14,14 @@ from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import LabelEncoder
 from sklearn.utils.class_weight import compute_class_weight
 
+# Load .env file
+try:
+    from dotenv import load_dotenv
+    _env_path = Path(__file__).parent.parent.parent / ".env"
+    load_dotenv(dotenv_path=_env_path)
+except ImportError:
+    pass
+
 
 def load_dataset(data_dir: str) -> pd.DataFrame:
     """
@@ -134,7 +142,7 @@ def train_model(
     print(f"Class weights: {class_weight}")
 
     # Build model
-    from lstm_model import build_lstm_model
+    from src.classifier.lstm_model import build_lstm_model
     model = build_lstm_model(
         max_words=max_words,
         max_len=max_len,

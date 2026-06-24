@@ -4,8 +4,20 @@ Free tier API for searching verified fact-checks.
 """
 
 import os
+import logging
 import requests
 from typing import List, Dict, Optional
+from pathlib import Path
+
+# Load .env file
+try:
+    from dotenv import load_dotenv
+    _env_path = Path(__file__).parent.parent.parent / ".env"
+    load_dotenv(dotenv_path=_env_path)
+except ImportError:
+    pass
+
+logger = logging.getLogger(__name__)
 
 
 class GoogleFactCheckAPI:
@@ -75,14 +87,26 @@ class GoogleFactCheckAPI:
 
     def _compute_recency(self, date_str: str) -> float:
         """Compute recency score from ISO date string."""
-        from datetime import datetime
+        from datetime import datetime, timezone
 
         if not date_str:
             return 0.5
 
         try:
-            date = datetime.fromisoformat(date_str.replace("Z", "+00:00"))
-            days_ago = (datetime.now() - date).days
+            # Normalize common date formats
+            cleaned = date_str.strip()
+            # Handle ISO 8601 with Z suffix
+            if cleaned.endswith("Z"):
+                cleaned = cleaned[:-1] + "+00:00"
+            # Handle bare date like "2024-01-15"
+            if len(cleaned) == 10 and cleaned[4] == "-" and cleaned[7] == "-":
+                cleaned += "T00:00:00+00:00"
+
+            date = datetime.fromisoformat(cleaned)
+            # Ensure timezone-aware comparison
+            if date.tzinfo is None:
+                date = date.replace(tzinfo=timezone.utc)
+            days_ago = (datetime.now(timezone.utc) - date).days
 
             if days_ago <= 30:
                 return 1.0
@@ -90,7 +114,7 @@ class GoogleFactCheckAPI:
                 return max(0.3, 1.0 - (days_ago / 365) * 0.7)
             else:
                 return max(0.1, 0.3 - (days_ago - 365) / 1000)
-        except (ValueError, TypeError):
+        except (ValueError, TypeError, OSError):
             return 0.5
 
 

@@ -5,10 +5,24 @@ Run this periodically to update the evidence database.
 """
 
 import os
+import sys
 import hashlib
 import json
 from pathlib import Path
 from typing import List, Dict, Optional
+
+# Load .env file
+try:
+    from dotenv import load_dotenv
+    _env_path = Path(__file__).parent.parent.parent / ".env"
+    load_dotenv(dotenv_path=_env_path)
+except ImportError:
+    pass
+
+# Ensure project root is on sys.path
+PROJECT_ROOT = Path(__file__).parent.parent.parent
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
 
 
 class EvidenceIndexer:
@@ -18,7 +32,7 @@ class EvidenceIndexer:
     """
 
     def __init__(self, chroma_path: str = "data/evidence/chroma_db"):
-        from retriever import HybridRetriever
+        from src.evidence.retriever import HybridRetriever
         self.retriever = HybridRetriever(chroma_path)
 
     def index_articles(self, articles: List[Dict]):

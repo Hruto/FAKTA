@@ -1,17 +1,38 @@
-# Arsitektur Sistem FAKTA — Fact-Checking AI berbasis Hybrid Model
-> **Tujuan:** Dokumen arsitektur lengkap untuk sistem pendeteksi hoax Bahasa Indonesia
+# Arsitektur Sistem FAKTA v3 — Fact-Checking AI Hybrid LSTM + LLM + Evidence
+
+> **Tujuan:** Dokumen arsitektur lengkap untuk sistem pendeteksi hoaks Bahasa Indonesia
+> **Versi:** 3.0 (Binary LSTM — Uncertain = lack of evidence, handled di fusion)
+
+---
 
 ## 1. Gambaran Umum
-pake 2 pipeline, 1 nya indobert sebagai klasifikasi, wikipedia sebagai verifikator. Googl e
-FAKTA adalah sistem deteksi hoax **hybrid** yang menggabungkan tiga pendekatan:
+
+FAKTA adalah sistem pendeteksi hoaks **hybrid** yang menggabungkan tiga pendekatan:
 
 | Komponen | Peran |
 |---|---|
-| **IndoBERT** | Klasifikasi pola linguistik per klaim | Pakai LSTM aja, lebih ringan. Karena jalannya 1 per 1
-| **LLM (Claim Extractor + Reasoning)** | Ekstraksi klaim utama, reasoning berbasis evidence |, untuk fine tune nya freeze layer terakhir
-| **Evidence Retrieval (RAG)** | Pencarian bukti dari sumber kredibel |
+| **LSTM Classifier** | Binary classification pola linguistik (hoax vs valid) |
+| **LLM (Gemini)** | Ekstraksi klaim, reasoning berbasis evidence, verdict per klaim |
+| **Evidence Retrieval** | Pencarian bukti dari Google Fact Check API, ChromaDB (BM25+embedding), Wikipedia |
 
-Keputusan final diambil melalui **weighted decision fusion** — bukan dari satu model tunggal.
+Keputusan final diambil melalui **confidence fusion berbasis regime** — bukan linear weighted scoring biasa.
+Evidence quality menjadi **confidence multiplier**, bukan skor hoax independen.
+
+**Prinsip utama:** "Tidak Cukup Bukti" (uncertain) **bukan** sesuatu yang dipelajari LSTM.
+Uncertain adalah **keadaan evidence** — terjadi ketika tidak ada evidence yang ditemukan untuk sebuah klaim.
+Fusion engine secara otomatis menarik skor ke tengah (0.5) saat evidence_quality = 0.
+
+### Perubahan dari Arsitektur v1
+
+1. **LSTM menggantikan IndoBERT** — lebih ringan, cocok untuk deployment demo
+2. **Binary LSTM (hoax vs valid)** — bukan 3-class. Uncertain = lack of evidence, bukan linguistic pattern
+3. **Fusion formula direvisi total** — evidence quality = confidence multiplier, bukan skor hoax additive
+4. **Double counting source credibility dihapus** — hanya dihitung sekali di evidence_quality
+5. **LSTM pakai full article text** — bukan hanya claim text, agar pola gaya bahasa hoaks terbaca
+6. **Article aggregation weighted** — bukan "1 hoax = artikel hoax", tapi importance + type + proportion
+7. **NEI otomatis dari fusion** — evidence_quality = 0 → skor ditarik ke 0.5 → "Tidak Cukup Bukti"
+8. **Evidence retrieval konkret** — Google FC API + ChromaDB + BM25 + Wikipedia tiered
+9. **Training di Google Colab** — GPU gratis, lebih cepat 5-10x dari CPU lokal
 
 ---
 
@@ -26,69 +47,73 @@ Keputusan final diambil melalui **weighted decision fusion** — bukan dari satu
 ┌─────────────────────────────────────────────┐
 │         NLP PREPROCESSING MODULE             │
 │  • Lowercase, hapus URL/emoji               │
-│  • Normalisasi slang (gk→tidak, bgt→banget) │
-│  • Tokenisasi, stemming, stopword removal   │
-│  • Ekstraksi metadata features               │ NLTK, TensorFlow
+│  • Normalisasi slang (80+ mapping)          │
+│  • Ekstraksi 14 fitur linguistik            │
 └──────────────────┬──────────────────────────┘
                    ↓
 ┌─────────────────────────────────────────────┐
-│         LLM CLAIM EXTRACTION                 │
-│  Input: teks yang sudah dibersihkan          │
+│         LLM CLAIM EXTRACTION (Gemini)        │
+│  1 API call per article (shared)             │
 │  Output: daftar klaim terstruktur (1-N)      │
-│  Contoh:                                     │
-│    Claim 1: "Vaksin menyebabkan gagal ginjal" │
-│    Claim 2: "Banyak korban meninggal"        │
+│  + claim_type: causal/factual/statistical/   │
+│    attribution/opinion                       │
 └──────────────────┬──────────────────────────┘
                    ↓
-        ┌──────────┴──────────┐
-        ↓                     ↓
+          ┌────────┴────────┐
+          ↓                 ↓
 ┌───────────────────┐ ┌──────────────────────┐
-│  CLASSIFIER MODEL  │ │ EVIDENCE RETRIEVAL   │
-│  per claim         │ │  per claim           │
+│  LSTM (FULL TEXT)  │ │ EVIDENCE RETRIEVAL   │
 │                   │ │                      │
-│  A. IndoBERT (utama) │  • BM25 (keyword)   │
-│  B. BiLSTM (baseline)│  • Sentence-Transformer │
-│                     │    (semantic search)  │
-│  Input: claim text  │  • Hybrid ranking     │
-│  Output:            │  • Top-3 evidence     │
-│    hoax_proba       │  • Source credibility │
-│    valid_proba      │    score              │
-│    uncertain_proba  │                      │
-└────────┬──────────┘ └──────────┬──────────┘
-         ↓                       ↓
-┌─────────────────────────────────────────────┐
-│         LLM EVIDENCE JUDGE                   │
-│  Input: claim + top-3 evidence              │
-│  Output: verdict (Supported/Refuted/NEI)    │
-│          + confidence + reasoning singkat   │
-│  Constraint: hanya gunakan evidence yang    │
-│  diberikan, tidak mengarang sumber baru      │
-└──────────────────┬──────────────────────────┘
-                   ↓
-┌─────────────────────────────────────────────┐
-│         DECISION FUSION ENGINE               │
-│  Weighted scoring per claim:                 │
-│    final = w1·BERT + w2·evidence            │
-│          + w3·LLM + w4·source_cred          │
-│          + w5·linguistic_features           │
-│                                              │
-│  Threshold:                                  │
-│    > 0.70 → Hoax (Refuted)                  │
-│    < 0.30 → Tidak Hoax (Supported)          │
-│    0.30–0.70 → Tidak Cukup Bukti (NEI)      │
-└──────────────────┬──────────────────────────┘
-                   ↓
-┌─────────────────────────────────────────────┐
-│         ARTICLE-LEVEL AGGREGATION            │
-│  Per-claim verdict → article verdict:       │
-│    • Jika ada 1+ klaim Refuted → Hoax       │
-│    • Semua Supported → Tidak Hoax           │
-│    • Sisanya → Tidak Cukup Bukti            │
-│                                              │
-│  Output terstruktur:                         │
-│    { verdict, confidence, claims[],          │
-│      evidence[], explanation, sources[] }    │
-└─────────────────────────────────────────────┘
+│  Input: full       │ │  Tier 1: Google FC   │
+│  article text      │ │  Tier 2: ChromaDB    │
+│  Output:           │ │  (BM25 + embedding)  │
+│  hoax_proba [0,1]  │ │  Tier 3: RSS feeds   │
+│  (binary: hoax)    │ │  Tier 4: Wikipedia   │
+│                   │ │                      │
+└────────┬──────────┘ │  Rule-based query gen │
+         ↓            │  (no LLM, saves 30%)  │
+                      └──────────┬───────────┘
+                                 ↓
+                  ┌──────────────────────────────┐
+                  │  LLM EVIDENCE JUDGE (Gemini) │
+                  │  1 API call per claim        │
+                  │  Input: claim + top-3 evid.  │
+                  │  Output: Supported/Refuted/  │
+                  │    NEI + confidence + reason │
+                  └──────────┬───────────────────┘
+                             ↓
+                  ┌──────────────────────────────┐
+                  │  CONFIDENCE FUSION ENGINE    │
+                  │  Regime-based (bukan linear): │
+                  │  • Strong evidence → trust   │
+                  │    LLM heavily (50%)         │
+                  │  • Weak evidence → lean LSTM │
+                  │    (55%) + low confidence    │
+                  │  • No evidence → LSTM only,  │
+                  │    pull toward NEI (0.5)     │
+                  │  Evidence quality =          │
+                  │  confidence multiplier       │
+                  │                              │
+                  │  ⚠️ "Tidak Cukup Bukti"       │
+                  │  muncul saat evidence = 0,   │
+                  │  bukan dari kelas LSTM       │
+                  └──────────┬───────────────────┘
+                             ↓
+                  ┌──────────────────────────────┐
+                  │  ARTICLE-LEVEL AGGREGATION    │
+                  │  Weighted by:                 │
+                  │  • Claim importance           │
+                  │  • Claim type priority        │
+                  │  • Proportion hoax vs valid   │
+                  │  Bukan "1 hoax = artikel hoax"│
+                  └──────────┬───────────────────┘
+                             ↓
+                  ┌──────────────────────────────┐
+                  │  FINAL OUTPUT                 │
+                  │  { verdict, confidence,       │
+                  │    claims[], evidence[],      │
+                  │    reasoning, stats }         │
+                  └──────────────────────────────┘
 ```
 
 ---
@@ -107,7 +132,7 @@ Raw Text
 1. Case folding → lowercase
 2. Hapus URL (http://, https://, www.)
 3. Hapus mention (@username) dan hashtag (#...)
-4. Hapus emoji berlebihan (sisakan maksimal 1 per kalimat)
+4. Hapus emoji berlebihan (sisakan maks. 1 per kalimat)
 5. Hapus karakter khusus yang tidak informatif
 6. Normalisasi tanda baca berlebihan (!!!, ???) → (!, ?)
 7. Hapus spasi ganda dan trim
@@ -115,7 +140,7 @@ Raw Text
 
 #### 3.1.2 Normalisasi Slang / Bahasa Tidak Baku
 
-Mapping menggunakan dictionary lookup:
+Mapping menggunakan dictionary lookup dengan 80+ entri (tanpa duplicate keys):
 
 | Slang | Normal |
 |---|---|
@@ -126,7 +151,7 @@ Mapping menggunakan dictionary lookup:
 | krn | karena |
 | jgn | jangan |
 | udh, udah | sudah |
-| klo, klo | kalau |
+| klo, klu | kalau |
 | sm | sama |
 | dr | dari |
 | sy, gua, gw | saya |
@@ -134,14 +159,13 @@ Mapping menggunakan dictionary lookup:
 | tp | tapi |
 | dpt | dapat |
 | nge- | me- (prefix) |
-| di- | di- (prefix) |
-| ke- | ke- (prefix) |
+| mager | malas bergerak |
+| santuy | santai |
+| wkwk | tertawa |
 
 Library yang dipakai: **Sastrawi** (stemmer Bahasa Indonesia).
 
-#### 3.1.3 Metadata Feature Extraction
-
-Fitur linguistik dan stilistik yang diekstrak dari teks mentah:
+#### 3.1.3 Metadata Feature Extraction (14 Fitur)
 
 | Fitur | Tipe | Contoh |
 |---|---|---|
@@ -152,19 +176,19 @@ Fitur linguistik dan stilistik yang diekstrak dari teks mentah:
 | `caps_ratio` | float | proporsi huruf kapital |
 | `exclamation_count` | int | jumlah tanda seru |
 | `question_count` | int | jumlah tanda tanya |
-| `provocative_word_count` | int | kata-kata provokatif (viral, heboh, geger, gempar, dll) |
+| `provocative_word_count` | int | kata-kata provokatif |
 | `clickbait_score` | float | skor berdasarkan pola clickbait |
 | `sentiment_score` | float | dari sentiment analyzer (-1 s/d +1) |
-| `has_source_mention` | bool | apakah ada nama institusi sumber |
-| `has_date_mention` | bool | apakah ada tanggal/waktu spesifik |
-| `has_data_mention` | bool | apakah ada angka/statistik |
-| `urgency_words` | int | kata-kata mendesak (segera, sebelum terlambat, dll) |
+| `has_source_mention` | bool | ada nama institusi sumber |
+| `has_date_mention` | bool | ada tanggal/waktu spesifik |
+| `has_data_mention` | bool | ada angka/statistik |
+| `urgency_words` | int | kata-kata mendesak |
 
-Fitur ini di-normalisasi (MinMax / StandardScaler) lalu concat ke output model.
+Fitur ini di-normalisasi (MinMax) lalu concat ke branch LSTM untuk feature fusion.
 
 ---
 
-### 3.2 LLM Claim Extraction Module
+### 3.2 LLM Claim Extraction Module (Gemini)
 
 **Tujuan:** Mengekstrak klaim-klaim faktual yang dapat diverifikasi dari teks.
 
@@ -182,14 +206,8 @@ Fitur ini di-normalisasi (MinMax / StandardScaler) lalu concat ke output model.
       "claim_text": "Vaksin menyebabkan gagal ginjal massal",
       "claim_type": "causal",
       "original_sentence": "Vaksin yang diberikan pemerintah menyebabkan gagal ginjal massal di Indonesia.",
-      "entities": ["vaksin", "gagal ginjal", "Indonesia"]
-    },
-    {
-      "claim_id": 2,
-      "claim_text": "Banyak korban meninggal akibat vaksin",
-      "claim_type": "factual",
-      "original_sentence": "Sudah banyak korban meninggal akibat vaksin ini.",
-      "entities": ["korban meninggal", "vaksin"]
+      "entities": ["vaksin", "gagal ginjal", "Indonesia"],
+      "importance": 1.0
     }
   ]
 }
@@ -197,132 +215,139 @@ Fitur ini di-normalisasi (MinMax / StandardScaler) lalu concat ke output model.
 
 #### 3.2.2 Claim Types
 
-| Tipe | Keterangan | Contoh |
-|---|---|---|
-| `causal` | Klaim sebab-akibat | "A menyebabkan B" |
-| `factual` | Klaim fakta | "Terjadi X di tempat Y" |
-| `statistical` | Klaim statistik/angka | "80% orang mengalami X" |
-| `attribution` | Klaim atribusi | "Menurut WHO, X benar" |
-| `opinion` | Opini / bukan fakta | "Menurut saya X buruk" |
+| Tipe | Keterangan | Weight | Contoh |
+|---|---|---|---|
+| `causal` | Klaim sebab-akibat | 1.0 | "A menyebabkan B" |
+| `factual` | Klaim fakta | 1.0 | "Terjadi X di tempat Y" |
+| `statistical` | Klaim statistik/angka | 0.8 | "80% orang mengalami X" |
+| `attribution` | Klaim atribusi | 0.6 | "Menurut WHO, X benar" |
+| `opinion` | Opini / bukan fakta | 0.0 | "Menurut saya X buruk" |
 
-**Note:** Klaim tipe `opinion` tidak masuk ke pipeline verifikasi — langsung dikembalikan sebagai "tidak dapat diverifikasi (opini)".
+**Note:** Klaim tipe `opinion` (weight 0.0) tidak masuk ke pipeline verifikasi — langsung dilewati di aggregation.
 
-#### 3.2.3 Prompt Template
+#### 3.2.3 Cost Optimization
 
-```
-Kamu adalah asisten ekstraksi klaim untuk sistem fact-checking.
+- Claim extraction: **1 API call** per article (shared untuk semua klaim)
+- Query generation: **0 API call** (rule-based, menghemat 30%)
+- Evidence judge: **1 API call per claim**
+- Total: ~4 LLM API calls per article (rata-rata 3 klaim)
 
-Dari teks berikut, ekstrak SEMUA klaim faktual yang dapat diverifikasi.
-Jangan masukkan opini, saran, atau pernyataan subjektif.
+#### 3.2.4 Fallback Mechanism
 
-Untuk setiap klaim, tentukan:
-- claim_text: klaim dalam 1 kalimat singkat
-- claim_type: causal / factual / statistical / attribution
-- original_sentence: kalimat asli tempat klaim berasal
-- entities: entitas kunci yang disebut
-
-Teks:
-{cleaned_text}
-
-Output dalam format JSON yang valid. Jangan tambahkan teks lain.
-```
-
-#### 3.2.4 Model yang Digunakan
-
-Untuk versi MVP: **LLM API (OpenAI/Gemini)** atau **local LLM (Ollama)**.
-
-Untuk versi lanjutan: fine-tune **IndoBERT** untuk task claim extraction (sequence labeling).
+Kalau Gemini API gagal/unavailable → fallback ke rule-based claim extraction:
+- Split by sentence
+- Filter sentences dengan pola klaim (kata kunci: menyebabkan, menurut, dilaporkan, dll)
+- Assign claim_type berdasarkan keyword matching
 
 ---
 
-### 3.3 Classifier Model Module
+### 3.3 LSTM Classifier Module (BINARY)
 
-**Tujuan:** Mengklasifikasikan setiap klaim sebagai hoax / valid / uncertain berdasarkan pola linguistik.
+**Tujuan:** Binary classification — apakah gaya bahasa artikel mirip hoaks atau tidak.
 
-#### 3.3.1 Model A: IndoBERT (Model Utama)
+> **Kenapa binary, bukan 3-class?**
+>
+> "Tidak Cukup Bukti" / "uncertain" **bukan pola bahasa** — itu adalah **keadaan evidence**.
+> Artinya: klaim diajukan, tapi sumber belum mengklarifikasi. Ini tidak bisa dipelajari dari gaya tulisan.
+>
+> Contoh:
+> - Hoax → caps lock berlebihan, emoji banyak, kata "SEBARKAN!", bahasa provokatif
+> - Valid → jurnalistik netral, ada sumber, ada tanggal/tempat
+> - Uncertain → **tidak ada pola bahasa khusus** — ini terjadi saat evidence retrieval tidak menemukan bukti
+>
+> Jadi LSTM cuma perlu belajar membedakan **2 pola**: hoax vs valid.
+> "Tidak Cukup Bukti" muncul otomatis di fusion engine saat evidence_quality = 0.
 
-**Arsitektur:**
+#### 3.3.1 Model Arsitektur — BiLSTM
 
 ```
-Input: claim_text (tokenized)
+Input: full article text (tokenized, max_len=200)
   ↓
-IndoBERT-base (pre-trained, fine-tuned)
-  ↓
-[CLS] token representation (768-dim)
+Embedding Layer (vocab_size=20000, dim=128, mask_zero=True)
   ↓
 Dropout (0.3)
   ↓
-Dense (256, ReLU)
+Bidirectional LSTM (units=64, return_sequences=True, dropout=0.3)
   ↓
-Dropout (0.2)
-  ↓
-Dense (128, ReLU)
-  ↓
-Dense (3, Softmax) → [hoax, valid, uncertain]
-```
-
-**Alasan:** Transformer-based model terbukti lebih kuat dari LSTM untuk fake news detection Bahasa Indonesia. Penelitian menunjukkan akurasi ~90% pada dataset TurnBackHoax gabungan.
-
-**Training Setup:**
-- Optimizer: AdamW (lr=2e-5)
-- Batch size: 16
-- Epochs: 5-10
-- Loss: Cross-Entropy (dengan class weights untuk handle imbalance)
-- Max sequence length: 256 tokens
-- Framework: Hugging Face Transformers
-
-#### 3.3.2 Model B: BiLSTM + Attention (Baseline)
-
-**Arsitektur:**
-
-```
-Input: claim_text (tokenized)
-  ↓
-Embedding Layer (vocab_size x 300)
-  Word2Vec / FastText Indonesia pre-trained
-  ↓
-Bidirectional LSTM (hidden=128, return_sequences=True)
-  ↓
-Attention Layer
-  ↓
-Dense (64, ReLU)
-  ↓
-Dropout (0.3)
+Bidirectional LSTM (units=32, return_sequences=False)
   ↓
 Dense (32, ReLU)
   ↓
-Dense (3, Softmax) → [hoax, valid, uncertain]
+Dropout (0.3)
+  ↓
+Dense (2, Softmax) → [hoax, valid]
 ```
 
-**Alasan:** Sebagai baseline akademis untuk menunjukkan improvement dari model sequence-based ke Transformer.
-
-**Training Setup:**
-- Embedding: FastText Indonesia (cc.id.300.bin)
-- Optimizer: Adam (lr=0.001)
-- Batch size: 64
-- Epochs: 20 (dengan early stopping patience=5)
-- Max sequence length: 200 tokens
-
-#### 3.3.3 Feature Fusion Branch
-
-Linguistic features dari Preprocessing Module digabung ke classifier:
+#### 3.3.2 Feature Fusion Branch (Opsional)
 
 ```
-IndoBERT/BiLSTM output → 128-dim vector
-                                    CONCAT → Dense(64) → Dense(3, Softmax)
-Linguistic features    → 14-dim vector (normalized)
+LSTM text output     → 64-dim vector
+                                CONCAT → Dense(32) → Dense(2, Softmax)
+Linguistic features  → 14-dim vector (normalized)
 ```
 
-Jadi model tidak hanya belajar dari teks tapi juga dari ciri-ciri stilistik.
+#### 3.3.3 Training Setup
 
-#### 3.3.4 Output per Claim
+| Parameter | Value |
+|---|---|
+| Optimizer | Adam (lr=0.001) |
+| Batch size | 64 |
+| Epochs | 20 (early stopping patience=5) |
+| Max sequence length | 200 |
+| Loss | Sparse Categorical Crossentropy |
+| Class weights | Otomatis dari sklearn |
+| Framework | TensorFlow/Keras |
+| Training location | **Google Colab (T4 GPU, gratis)** |
+
+#### 3.3.4 Dataset Strategy — Binary (Hoax vs Valid)
+
+| Label | Minimum | Ideal | Sumber Utama |
+|---|---|---|---|
+| **hoax** | 3,000 | 10,000+ | TurnBackHoax, MAFINDO, Kominfo |
+| **valid** | 2,000 | 5,000+ | Kompas, Tempo, BMKG, BPOM |
+| **TOTAL** | **5,000** | **15,000+** | |
+
+> **Tidak perlu dataset "uncertain" untuk training LSTM.**
+> "Tidak Cukup Bukti" muncul dari fusion engine saat evidence tidak ditemukan.
+
+**Data Split:**
+```
+Training:   70%  (stratified by class AND source)
+Validation: 15%
+Test:       15%  (time-based: data terbaru sebagai test)
+```
+
+#### 3.3.5 Output per Artikel
 
 ```json
 {
-  "claim_id": 1,
-  "bert_proba": { "hoax": 0.82, "valid": 0.12, "uncertain": 0.06 },
-  "bilstm_proba": { "hoax": 0.75, "valid": 0.18, "uncertain": 0.07 }
+  "lstm_hoax_proba": 0.82,
+  "lstm_valid_proba": 0.18
 }
+```
+
+`lstm_hoax_proba` inilah yang masuk ke fusion engine sebagai `lstm_hoax` parameter.
+
+#### 3.3.6 File Deployment (Yang Dibutuhkan Sistem)
+
+Saat training di Colab, banyak file dihasilkan. Yang **dibutuhkan untuk deployment** hanya 3:
+
+| File | Dipakai? | Fungsi |
+|---|---|---|
+| `lstm_model.keras` | ✅ **YA** | Model weights — otak LSTM |
+| `tokenizer.pkl` | ✅ **YA** | Convert text → angka sequences (harus sama dengan saat training) |
+| `label_map.json` | ✅ **YA** | Mapping index → label name |
+| `training_history.png` | ❌ | Visualisasi only, untuk paper |
+| `confusion_matrix.png` | ❌ | Evaluasi only, untuk paper |
+| `metrics_report.json` | ❌ | Evaluasi only, untuk paper |
+| `checkpoint_epoch_XX.keras` | ❌ | Intermediate, sudah diganti final model |
+
+File yang ditaruh di `models/lstm/`:
+```
+models/lstm/
+├── lstm_model.keras
+├── tokenizer.pkl
+└── label_map.json
 ```
 
 ---
@@ -331,43 +356,45 @@ Jadi model tidak hanya belajar dari teks tapi juga dari ciri-ciri stilistik.
 
 **Tujuan:** Mencari bukti yang relevan untuk setiap klaim dari sumber kredibel.
 
-#### 3.4.1 Arsitektur Retrieval — Hybrid Search
+#### 3.4.1 Tiered Source Architecture
+
+| Prioritas | Sumber | Strategi | Biaya |
+|---|---|---|---|
+| Tier 1 | Google Fact Check API | Direct API call, cache 7 hari | Gratis |
+| Tier 2 | Local ChromaDB | BM25 + embedding, pre-scraped data | Gratis |
+| Tier 3 | RSS feeds (Kemenkes, BMKG) | Scheduled crawl → indexed | Gratis |
+| Tier 4 | Wikipedia API | Fallback general knowledge | Gratis |
+
+#### 3.4.2 Hybrid Retrieval Flow
 
 ```
 Claim Text
     ↓
-┌───────────────────┐  ┌──────────────────────────┐
-│  BM25 (Keyword)   │  │  Sentence-Transformer     │
-│  • Token-based    │  │  (Semantic)               │
-│  • Exact match    │  │  • Embedding similarity   │
-│  • TF-IDF weighted│  │  • cos(A, B)              │
-└────────┬──────────┘  └────────────┬─────────────┘
-         ↓                          ↓
-┌──────────────────────────────────────────────┐
-│          HYBRID RANKING                       │
-│  score = α·BM25_score + (1-α)·Semantic_score │
-│  α = 0.4 (prioritaskan semantic)             │
-│  Top-K = 5 kandidat                          │
-└──────────────────┬───────────────────────────┘
-                   ↓
-┌──────────────────────────────────────────────┐
-│          SOURCE CREDIBILITY FILTER            │
-│  Tier 1 (weight 1.0): Kemenkes, WHO, BMKG    │
-│  Tier 2 (weight 0.8): Kompas, Tempo, Detik   │
-│  Tier 3 (weight 0.6): MAFINDO/TurnBackHoax   │
-│  Tier 4 (weight 0.4): Blog/forum/media kecil │
-│                                              │
-│  Top-3 evidence setelah filter               │
-└──────────────────────────────────────────────┘
+Rule-based Query Generation (NO LLM — saves 30%)
+    ↓
+┌──────────┬──────────┬──────────┐
+│ Google   │ ChromaDB │ Wikipedia│
+│ FC API   │ (BM25+   │ (T4)     │
+│ (T1)     │ emb) (T2)│          │
+└────┬─────┴────┬─────┴────┬─────┘
+     ↓          ↓          ↓
+     Results Merger & Reranker
+     • Deduplicate by URL
+     • Hybrid score: 0.4*BM25 + 0.6*embedding
+     • Source credibility boost
+     • Top-3 return
+     ↓
+SQLite Cache (7-day TTL)
 ```
 
-#### 3.4.2 Database / Vector Store
+#### 3.4.3 Embedding Model (Gratis, Local)
 
-**Pilihan untuk MVP:**
-- **ChromaDB** — mudah setup, in-memory, cocok untuk development
-- **FAISS** — lebih cepat untuk dataset besar
+```
+sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2
+```
+~300MB, download sekali saja saat pertama kali run. Runs on CPU.
 
-**Skema dokumen evidence:**
+#### 3.4.4 Skema Dokumen Evidence
 
 ```json
 {
@@ -378,66 +405,30 @@ Claim Text
   "title": "Fakta tentang Gagal Ginjal",
   "text": "Tidak ada bukti ilmiah bahwa konsumsi matcha...",
   "category": "health",
-  "date_published": "2025-03-15",
-  "embedding": [0.12, -0.34, ...]
+  "date_published": "2025-03-15"
 }
 ```
 
-#### 3.4.3 Sumber Data Evidence
+#### 3.4.5 Scoring
 
-| Sumber | Tipe | Cara Ingest |
-|---|---|---|
-| TurnBackHoax (MAFINDO) | Database hoax | Scraping + manual entry |
-| Kominfo (info.gov.id) | Klarifikasi resmi | Scraping / API |
-| Kemenkes / WHO | Sumber kesehatan | Manual curation |
-| BMKG | Cuaca/gempa | API / scraping |
-| Media kredibel (Kompas, Tempo, dll) | Berita | Scraping + RSS |
-| Wikipedia | Referensi umum | API / dump |
-| Jurnal akademik | Sumber ilmiah | Google Scholar API |
+Hybrid score = 0.4 × BM25_score + 0.6 × semantic_score
+Final score = hybrid_score × credibility_weight
 
-#### 3.4.4 Output Evidence per Claim
-
-```json
-{
-  "claim_id": 1,
-  "evidence": [
-    {
-      "source": "Kemenkes RI",
-      "source_tier": 1,
-      "url": "https://kemkes.go.id/fakta-matcha",
-      "text": "Konsumsi matcha dalam batas normal tidak terbukti menyebabkan gagal ginjal.",
-      "bm25_score": 0.72,
-      "semantic_score": 0.85,
-      "hybrid_score": 0.80,
-      "credibility_weight": 1.0,
-      "final_score": 0.80
-    },
-    {
-      "source": "TurnBackHoax",
-      "source_tier": 3,
-      "url": "https://turnbackhoax.id/matcha-gagal-ginjal-hoax",
-      "text": "Klaim bahwa matcha menyebabkan gagal ginjal tidak benar.",
-      "bm25_score": 0.68,
-      "semantic_score": 0.78,
-      "hybrid_score": 0.74,
-      "credibility_weight": 0.6,
-      "final_score": 0.44
-    }
-  ],
-  "best_evidence_score": 0.80
-}
-```
+Credibility weights:
+- Tier 1: 1.0 (Kemenkes, WHO, BMKG, BPOM)
+- Tier 2: 0.9 (Kompas, Tempo, Detik)
+- Tier 3: 0.75 (MAFINDO/TurnBackHoax)
+- Tier 4: 0.4 (Blog/forum/media kecil)
 
 ---
 
-### 3.5 LLM Evidence Judge Module
+### 3.5 LLM Evidence Judge Module (Gemini)
 
 **Tujuan:** Menganalisis klaim bersama evidence dan memberikan verdict berbasis bukti.
 
 #### 3.5.1 Input & Output
 
 **Input:**
-
 ```json
 {
   "claim": "Minum matcha setiap hari menyebabkan gagal ginjal",
@@ -449,182 +440,182 @@ Claim Text
 ```
 
 **Output:**
-
 ```json
 {
   "claim_id": 1,
   "verdict": "Refuted",
   "confidence": 0.88,
-  "reasoning": "Klaim bahwa konsumsi matcha menyebabkan gagal ginjal dibantah oleh Kementerian Kesehatan RI yang menyatakan tidak ada bukti ilmiah untuk hal tersebut. TurnBackHoax juga telah mengklarifikasi klaim ini sebagai hoaks.",
+  "reasoning": "Klaim dibantah oleh Kementerian Kesehatan RI...",
   "evidence_used": ["Kemenkes RI", "TurnBackHoax"]
 }
 ```
 
-#### 3.5.2 Prompt Template
+#### 3.5.2 Verdict Types
 
-```
-Kamu adalah asisten fact-checking. Tugasmu adalah menganalisis klaim berdasarkan
-bukti yang disediakan dan menentukan verdict.
+| Verdict | Arti |
+|---|---|
+| **Supported** | Evidence kuat mendukung klaim → klaim VALID |
+| **Refuted** | Evidence kuat membantah klaim → klaim HOAX |
+| **NotEnoughEvidence** | Evidence tidak cukup/ambigu → NEI |
 
-VERDICT YANG MUNGKIN:
-1. Supported — bukti kuat mendukung klaim
-2. Refuted — bukti kuat membantah klaim
-3. NotEnoughEvidence — bukti tidak cukup atau tidak relevan
+#### 3.5.3 Constraint
 
-ATURAN:
-- HANYA gunakan evidence yang diberikan. JANGAN membuat fakta baru.
-- JANGAN mencari informasi di luar evidence.
-- Jika evidence bertentangan, jelaskan konfliknya.
-- Jika evidence tidak relevan dengan klaim → NotEnoughEvidence.
-- Berikan reasoning singkat (2-3 kalimat) yang merujuk ke evidence spesifik.
-
-KLAIM:
-{claim_text}
-
-BUKTI:
-{evidence_list}
-
-Output dalam format JSON:
-{
-  "verdict": "Supported" | "Refuted" | "NotEnoughEvidence",
-  "confidence": <0.0-1.0>,
-  "reasoning": "..."
-}
-```
+LLM **hanya boleh menggunakan evidence yang diberikan**, tidak boleh mengarang sumber baru. Prompt constraint enforced.
 
 ---
 
-### 3.6 Decision Fusion Engine
+### 3.6 Confidence Fusion Engine (REVISED — Critical Fix)
 
 **Tujuan:** Menggabungkan semua sinyal menjadi keputusan final per klaim.
 
-#### 3.6.1 Weighted Scoring Formula
+#### 3.6.1 Masalah di Formula Lama (v1)
 
-Untuk setiap klaim, hitung final score:
+Formula lama menambahkan evidence_relevance, source_credibility, recency sebagai skor hoax independen → **arahless**, mendorong skor ke atas meskipun evidence menunjukkan "Supported".
+
+Contoh bug:
+```
+lstm = 0.85 (curiga hoax)
+llm = 0.00 (Supported — klaim valid)
+relevance = 0.80 (evidence sangat relevan)
+credibility = 0.40 (sumber kurang kredibel)
+
+Formula lama: 0.30(0.85) + 0.40(0.00) + 0.15(0.80) + 0.10(0.40) + 0.05(recency)
+            = 0.255 + 0.000 + 0.120 + 0.040 + ...
+            = 0.445 → "Tidak Cukup Bukti"
+
+Padahal LLM sudah bilang Supported! Tapi evidence_relevance mendorong skor ke atas.
+```
+
+#### 3.6.2 Formula Baru — Evidence Quality = Confidence Multiplier
+
+```python
+# Step 1: LLM → directional signal
+# Refuted → +confidence (hoax direction), Supported → -confidence (valid direction)
+if llm_verdict == "Refuted":
+    llm_signal = llm_confidence       # positif → hoax
+elif llm_verdict == "Supported":
+    llm_signal = -llm_confidence      # negatif → valid
+else:  # NEI
+    llm_signal = 0.0                  # netral
+
+llm_hoax_normalized = (llm_signal + 1.0) / 2.0  # [-1,+1] → [0,1]
+```
+
+```python
+# Step 2: Evidence Quality (bukan skor hoax!)
+evidence_quality = 0.50 * relevance + 0.30 * credibility + 0.20 * recency
+# [0, 1] — hanya mengukur KUALITAS bukti, bukan arah hoax
+```
+
+```python
+# Step 3: Regime-based Fusion
+if evidence_quality >= 0.50:
+    # STRONG EVIDENCE — trust LLM + evidence
+    final_hoax = 0.25 * lstm + 0.50 * llm_hoax_normalized + 0.10 * linguistic
+    confidence = evidence_quality * (1.0 - conflict * 0.3)
+
+elif evidence_quality > 0:
+    # WEAK EVIDENCE — lean on LSTM, low confidence
+    final_hoax = 0.55 * lstm + 0.10 * llm_hoax_normalized + 0.25 * linguistic
+    confidence = evidence_quality * 0.5
+
+else:
+    # NO EVIDENCE — LSTM only, pull toward NEI (0.5)
+    final_hoax = 0.69 * lstm + 0.31 * linguistic
+    # Pull toward 0.5 if LSTM uncertain
+    confidence = 0.3 + 0.2 * (1.0 - lstm_uncertainty)
+```
+
+```python
+# Step 4: Verdict mapping
+if final_hoax > 0.70: verdict = "Hoax"
+elif final_hoax < 0.30: verdict = "Tidak Hoax"
+else: verdict = "Tidak Cukup Bukti"
+```
+
+#### 3.6.3 Bagaimana "Tidak Cukup Bukti" Muncul (Binary LSTM)
+
+Karena LSTM cuma binary (hoax vs valid), "Tidak Cukup Bukti" muncul dari **regime fusion**, bukan dari kelas LSTM:
 
 ```
-final_score = (w1 × bert_hoax_proba)
-            + (w2 × best_evidence_score × contradiction_factor)
-            + (w3 × llm_refuted_score)
-            + (w4 × (1 - source_credibility_avg))
-            + (w5 × linguistic_hoax_score)
+Skenario A: Evidence kuat → verdict dari LLM + evidence (bukan LSTM)
+  → Bisa "Hoax" atau "Tidak Hoax"
+
+Skenario B: Evidence lemah → verdict condong ke LSTM, confidence rendah
+  → Biasanya "Tidak Cukup Bukti" karena confidence rendah
+
+Skenario C: Evidence TIDAK ADA (evidence_quality = 0)
+  → Skor ditarik ke 0.5 → verdict otomatis "Tidak Cukup Bukti"
+  → Ini adalah kasus "uncertain" yang sesungguhnya
 ```
 
-**Bobot default:**
+#### 3.6.4 Key Changes v1 → v3
 
-| Sinyal | Bobot | Alasan |
+| Issue | Sebelum (v1) | Sesudah (v3) |
 |---|---|---|
-| `bert_hoax_proba` | w1 = 0.20 | Pattern recognition dari Transformer |
-| `evidence_contradiction` | w2 = 0.35 | Sinyal terkuat — bukti langsung |
-| `llm_refuted_score` | w3 = 0.25 | Reasoning berbasis evidence |
-| `source_credibility` | w4 = 0.10 | Kredibilitas sumber evidence |
-| `linguistic_features` | w5 = 0.10 | Ciri stilistik hoax |
-
-**Contradiction factor:**
-```
-Jika evidence mendukung klaim → contradiction_factor = 0.0
-Jika evidence membantah klaim  → contradiction_factor = 1.0
-Jika evidence mixed            → contradiction_factor = 0.5
-```
-
-Ditentukan oleh LLM Evidence Judge berdasarkan perbandingan klaim vs evidence.
-
-#### 3.6.2 Threshold Keputusan
-
-| Final Score | Verdict | Label Output |
-|---|---|---|
-| > 0.70 | **Refuted** | `Hoax` |
-| < 0.30 | **Supported** | `Tidak Hoax` |
-| 0.30 — 0.70 | **NotEnoughEvidence** | `Tidak Cukup Bukti` |
-
-#### 3.6.3 Confidence Score
-
-```
-confidence = max(final_score, 1 - final_score)
-
-Jika verdict = Hoax → confidence = final_score
-Jika verdict = Tidak Hoax → confidence = 1 - final_score
-Jika verdict = Tidak Cukup Bukti → confidence = 1 - |2 × final_score - 1|
-```
-
-Jadi di area "Tidak Cukup Bukti" (score ~0.5), confidence rendah.
-
-#### 3.6.4 Output per Claim (Final)
-
-```json
-{
-  "claim_id": 1,
-  "claim_text": "Minum matcha setiap hari menyebabkan gagal ginjal",
-  "verdict": "Hoax",
-  "verdict_raw": "Refuted",
-  "confidence": 0.86,
-  "score_breakdown": {
-    "bert_hoax": 0.82,
-    "evidence_contradiction": 0.80,
-    "llm_refuted": 0.88,
-    "source_credibility_low": 0.10,
-    "linguistic_hoax": 0.65,
-    "final_score": 0.78
-  },
-  "reasoning": "Klaim dibantah oleh Kemenkes RI dan telah diklarifikasi oleh TurnBackHoax sebagai informasi tidak benar.",
-  "evidence_sources": [
-    { "name": "Kemenkes RI", "url": "https://..." },
-    { "name": "TurnBackHoax", "url": "https://..." }
-  ]
-}
-```
+| Evidence scores | + 0.15*relevance + 0.10*credibility | Digabung jadi evidence_quality → confidence multiplier |
+| Source credibility | Dihitung 2x (LLM + Fusion) | Hanya di evidence_quality, tidak additive di fusion |
+| NEI handling | Selalu mapped ke 0.5 | "no_results" = netral, "ambiguous" = weak signal |
+| Weights | Static | Adaptive: strong/weak/no evidence regime |
+| LSTM classes | 3-class (hoax/valid/uncertain) | **Binary** (hoax/valid) — uncertain dari fusion |
+| "Tidak Cukup Bukti" | Kelas LSTM | **Regime fusion result** saat evidence = 0 |
 
 ---
 
-### 3.7 Article-Level Aggregation Module
+### 3.7 Article-Level Aggregation Module (REVISED)
 
 **Tujuan:** Menggabungkan verdict per-klaim menjadi verdict untuk seluruh artikel.
 
-#### 3.7.1 Aggregation Rules
+#### 3.7.1 Masalah di v1
 
-| Kondisi | Article Verdict | Alasan |
+"Jika ada ≥1 klaim Hoax → Artikel = Hoax" → terlalu agresif. Artikel valid dengan 1 kalimat opinion yang salah-classified jadi "Hoax" padahal intinya valid.
+
+#### 3.7.2 Rules Baru — Weighted Aggregation
+
+1. Opinion claims di-skip (weight 0.0)
+2. Setiap klaim diberi weight = importance × claim_type_weight
+3. Weighted average hoax score
+4. Verdict berdasarkan kombinasi:
+   - High-confidence hoax claim (conf ≥ 0.70, weight ≥ 0.5) + hoax > valid → Hoax
+   - Semua verifiable = Tidak Hoax → Tidak Hoax
+   - Campuran → Tidak Cukup Bukti
+
+#### 3.7.3 Claim Type Weights
+
+| Type | Weight | Alasan |
 |---|---|---|
-| Ada ≥1 klaim `Hoax` | **Hoax** | Satu klaim salah sudah cukup untuk label artikel hoax |
-| Semua klaim `Tidak Hoax` | **Tidak Hoax** | Semua klaim terbukti benar |
-| Semua klaim `Tidak Cukup Bukti` | **Tidak Cukup Bukti** | Tidak ada yang bisa diverifikasi |
-| Campuran `Tidak Hoax` + `Tidak Cukup Bukti` | **Tidak Cukup Bukti** | Sebagian benar, sebagian belum bisa dicek |
-| Tidak ada klaim yang bisa diekstrak | **Tidak Cukup Bukti** | Artikel opini / tidak ada klaim faktual |
+| factual | 1.0 | Klaim langsung paling penting |
+| causal | 1.0 | Sebab-akibat kritis untuk diverifikasi |
+| statistical | 0.8 | Klaim angka |
+| attribution | 0.6 | Atribusi (kurang kritis) |
+| opinion | 0.0 | Opini tidak diverifikasi |
 
-#### 3.7.2 Article Confidence
-
-```
-article_confidence = max(confidence_klaim_hoax) jika ada klaim hoax
-article_confidence = min(confidence_semua_klaim) jika semua valid
-article_confidence = average(confidence) jika mixed
-```
-
-#### 3.7.3 Output Final Sistem
+#### 3.7.4 Output Final Sistem
 
 ```json
 {
   "verdict": "Hoax",
-  "confidence": 0.86,
-  "article_summary": "Artikel mengandung klaim yang dibantah oleh sumber kredibel.",
+  "confidence": 0.72,
+  "avg_hoax_score": 0.78,
+  "summary": "Artikel mengandung 1 klaim yang dibantah oleh sumber kredibel...",
   "claims": [
     {
-      "claim_id": 1,
-      "claim_text": "Minum matcha menyebabkan gagal ginjal",
+      "claim_text": "Matcha menyebabkan gagal ginjal",
+      "claim_type": "causal",
       "verdict": "Hoax",
       "confidence": 0.86,
+      "mode": "strong_evidence",
       "reasoning": "...",
       "evidence_sources": ["Kemenkes RI", "TurnBackHoax"]
-    },
-    {
-      "claim_id": 2,
-      "claim_text": "Banyak korban meninggal akibat matcha",
-      "verdict": "Tidak Cukup Bukti",
-      "confidence": 0.42,
-      "reasoning": "Tidak ditemukan bukti yang cukup...",
-      "evidence_sources": []
     }
   ],
-  "risk_level": "High",
-  "recommendation": "Informasi ini mengandung klaim yang tidak benar. Harap verifikasi dari sumber kredibel.",
+  "claim_stats": {
+    "total_claims": 3,
+    "verifiable_claims": 2,
+    "hoax_claims": 1,
+    "valid_claims": 1,
+    "nei_claims": 0
+  },
   "processing_time_ms": 3450
 }
 ```
@@ -633,39 +624,51 @@ article_confidence = average(confidence) jika mixed
 
 ## 4. Dataset & Training
 
-### 4.1 Dataset Utama (Bahasa Indonesia)
+### 4.1 Dataset Utama (Bahasa Indonesia) — Binary
 
-| Dataset | Sumber | Ukuran | Label |
-|---|---|---|---|
-| **TurnBackHoax** | MAFINDO | 10.000+ | Hoax / Non-hoax |
-| **Indonesian Hoax News Detection** | Mendeley Data | ~4.000 | Hoax / Non-hoax |
-| **Kaggle CNN Indonesia / Tempo** | Kaggle | ~5.000 | Hoax / Non-hoax |
-| **Custom scraped** | TurnBackHoax.id | Scraping langsung | Hoax / Non-hoax |
+| Dataset | Sumber | Estimasi | Label | Cara Akses |
+|---|---|---|---|---|
+| **TurnBackHoax** | MAFINDO | ~12,000-15,000 | Hoax | Scraping (1 req/2s) |
+| **CekFakta** | Tempo | ~2,000-3,000 | Hoax/Valid | Scraping |
+| **Kominfo Hoax** | Kominfo | ~5,000+ | Hoax | Scraping |
+| **ISHOX** | Kaggle/Mendeley | ~3,000-5,000 | Hoax/Non-hoax | Download |
+| **Media Kredibel** | Kompas/Tempo | ~3,000-5,000 | Valid | Scraping section non-hoax |
 
-### 4.2 Dataset Internasional (Opsional — Transfer Learning)
+### 4.2 Estimated Totals After Collection
 
-| Dataset | Kegunaan |
-|---|---|
-| FEVER | Claim verification (Supported/Refuted/NEI) |
-| LIAR | Fact-checking dengan metadata |
-| FakeNewsNet | Fake news dengan social context |
+| Kelas | Estimasi | Notes |
+|---|---|---|
+| Hoax | ~15,000-20,000 | TurnBackHoax + Kominfo + ISHOX |
+| Valid | ~8,000-12,000 | News valid + cekfakta clarified |
+
+> **Tidak ada kelas "uncertain" di dataset LSTM.**
+> "Tidak Cukup Bukti" adalah output fusion engine, bukan kelas klasifikasi.
 
 ### 4.3 Data Split
 
 ```
-Training:   70%
+Training:   70%  (stratified by class AND source)
 Validation: 15%
-Test:       15%
+Test:       15%  (time-based: data terbaru sebagai test)
 ```
 
-**Stratified split** untuk menjaga distribusi kelas.
+### 4.4 Training Location
 
-### 4.4 Class Imbalance Handling
+**Google Colab (Recommended)** — T4 GPU gratis:
+- Training time: **2-5 menit** (vs 10-30 menit di CPU lokal)
+- Tidak perlu install TensorFlow di laptop
+- RAM 12GB+ tersedia
+- Semua dependency sudah ada
+- Notebook: `notebooks/colab_lstm_training.ipynb`
+
+Setelah training selesai di Colab → download model (lstm_model.zip) → extract ke `models/lstm/` → jalankan API + UI di laptop lokal.
+
+### 4.5 Class Imbalance Handling
 
 ```
-• Class weights dalam loss function
-• SMOTE oversampling (untuk classical models)
+• Class weights dalam loss function (otomatis dari sklearn)
 • Data augmentation: synonym replacement, back-translation
+• Oversampling minority class jika diperlukan
 ```
 
 ---
@@ -681,7 +684,6 @@ Test:       15%
 | **Recall (Hoax)** | > 0.85 | Jangan sampai hoax terlewat |
 | **Precision (Hoax)** | > 0.80 | Minimalkan false positive |
 | **ROC-AUC** | > 0.90 | Separability antar kelas |
-| **Confusion Matrix** | — | Analisis error pattern |
 
 ### 5.2 Evidence Retrieval Metrics
 
@@ -691,309 +693,275 @@ Test:       15%
 | **NDCG@5** | > 0.75 |
 | **Mean Reciprocal Rank** | > 0.60 |
 
-### 5.3 Claim Extraction Metrics
-
-| Metrik | Target |
-|---|---|
-| **Claim F1** | > 0.75 |
-| **Claim Recall** | > 0.80 |
-
-### 5.4 End-to-End Metrics
+### 5.3 End-to-End Metrics
 
 | Metrik | Target |
 |---|---|
 | **False Positive Rate** | < 10% |
 | **False Negative Rate** | < 15% |
-| **Average processing time** | < 5 detik |
+| **Average processing time** | < 10 detik/article |
 
 ---
 
 ## 6. Tech Stack
 
-### 6.1 Development & ML
+### 6.1 Core (Semua Modul)
 
 ```
-Python 3.11+
-Pandas, NumPy
-Scikit-learn (baseline models)
-Hugging Face Transformers (IndoBERT)
-TensorFlow / PyTorch (BiLSTM)
-NLTK + Sastrawi (NLP Indonesia)
-Sentence-Transformer (semantic search)
-FAISS / ChromaDB (vector store)
-LangChain (opsional — orchestrasi RAG)
+Python 3.10+
+google-generativeai   (LLM Gemini)
+fastapi + uvicorn     (Backend API)
+streamlit             (Demo UI)
+pydantic              (Request/response validation)
+python-dotenv         (.env file loading)
+pyyaml                (Config files)
 ```
 
-### 6.2 LLM Integration
+### 6.2 ML & NLP
 
 ```
-OpenAI API (GPT-4o-mini / GPT-4o) — claim extraction & reasoning
-ATAU
-Google Gemini API
-ATAU
-Ollama (local LLM — llama3/llama3.1) — offline mode
+tensorflow>=2.15      (LSTM training — di Colab)
+nltk + sastrawi       (NLP Bahasa Indonesia)
+pandas, numpy         (Data processing)
+scikit-learn          (Evaluation metrics, class weights)
 ```
 
-### 6.3 Backend & API
+### 6.3 Evidence Retrieval
 
 ```
-FastAPI (REST API)
-Pydantic (request/response validation)
-SQLite / PostgreSQL (data storage)
-Redis (caching evidence queries)
+chromadb>=0.4         (Vector database)
+sentence-transformers (Embedding model — multilingual)
+rank_bm25             (Keyword search)
+wikipedia-api         (Wikipedia fallback)
+requests, bs4, lxml   (Web scraping)
 ```
 
-### 6.4 Frontend / UI
+### 6.4 API Cost Estimation
 
-```
-MVP: Streamlit (cepat, untuk demo/validasi)
-Production: Next.js / React + Tailwind CSS
-```
+| Scenario | Usage | Cost |
+|---|---|---|
+| Demo (10 articles/day) | 40 calls/day | **$0** (free tier) |
+| Testing (50 articles/day) | 200 calls/day | **$0** (free tier) |
+| Heavy (200+/day) | 800+ calls/day | ~$1-3/bulan |
 
-### 6.5 DevOps (Opsional)
-
-```
-Docker (containerization)
-GitHub Actions (CI/CD)
-Hugging Face Hub (model hosting)
-```
+**Free tier Gemini 2.0 Flash:** ~1,500 requests/hari — cukup untuk demo.
 
 ---
 
-## 7. Roadmap MVP
-
-### Fase 1: Baseline (Minggu 1-2)
-
-```
-✓ Kumpulkan & bersihkan dataset
-✓ Preprocessing pipeline
-✓ TF-IDF + SVM / Logistic Regression
-✓ Evaluasi baseline metrics
-```
-
-**Output:** Model klasifikasi sederhana, akurasi target ~75-80%.
-
-### Fase 2: Deep Learning (Minggu 3-4)
-
-```
-✓ BiLSTM + Attention model
-✓ IndoBERT fine-tuning
-✓ Feature fusion (linguistic features)
-✓ Perbandingan BiLSTM vs IndoBERT
-```
-
-**Output:** Dua model deep learning dengan perbandingan metrics.
-
-### Fase 3: Claim Extraction (Minggu 5)
-
-```
-✓ LLM claim extraction pipeline
-✓ Claim type classification
-✓ Evaluasi claim extraction quality
-```
-
-**Output:** Sistem bisa memecah artikel menjadi klaim-klaim terverifikasi.
-
-### Fase 4: Evidence Retrieval (Minggu 6-7)
-
-```
-✓ Setup ChromaDB / FAISS
-✓ Ingest evidence dari TurnBackHoax + sumber lain
-✓ BM25 + Semantic hybrid search
-✓ Source credibility scoring
-```
-
-**Output:** Database evidence yang bisa di-query per klaim.
-
-### Fase 5: LLM Reasoning + Fusion (Minggu 8)
-
-```
-✓ LLM evidence judge
-✓ Decision fusion engine (weighted scoring)
-✓ Article-level aggregation
-✓ Structured output generation
-```
-
-**Output:** Sistem hybrid lengkap dengan verdict + confidence + reasoning.
-
-### Fase 6: UI + Deployment (Minggu 9-10)
-
-```
-✓ Streamlit UI
-✓ FastAPI backend
-✓ End-to-end testing
-✓ Dokumentasi & paper
-```
-
-**Output:** Aplikasi web yang bisa didemokan.
-
----
-
-## 8. Struktur Folder Project
+## 7. Struktur Folder Project
 
 ```
 FAKTA/
-├── data/
-│   ├── raw/                    # Dataset mentah
-│   ├── processed/              # Dataset yang sudah diproses
-│   └── evidence/               # Database evidence
-│       ├── turnbackhoax/
-│       ├── kominfo/
-│       └── kemenkes/
-├── models/
-│   ├── baseline/               # TF-IDF + SVM/LR
-│   ├── bilstm/                 # BiLSTM model + weights
-│   └── indobert/               # IndoBERT fine-tuned
+├── Arsitektur.md                  # Dokumen ini
+├── PANDUAN_LENGKAP.md             # Step-by-step guide
+├── README.md                      # Project overview
+├── requirements.txt               # Dependencies
+├── .env.example                   # Template env vars
+├── .env                           # Actual env (gitignored)
+├── .gitignore
+│
+├── configs/
+│   ├── fusion_config.yaml         # Fusion weights & thresholds
+│   ├── source_tiers.yaml          # 5-tier source credibility
+│   └── lstm_config.yaml           # LSTM hyperparameters
+│
 ├── src/
 │   ├── __init__.py
 │   ├── preprocessing/
-│   │   ├── __init__.py
-│   │   ├── cleaning.py         # Text cleaning
-│   │   ├── slang_normalizer.py # Slang mapping
-│   │   └── feature_extractor.py# Linguistic features
+│   │   ├── cleaning.py            # Text cleaning pipeline
+│   │   ├── slang_normalizer.py    # 80+ slang → formal ID
+│   │   └── feature_extractor.py   # 14 linguistic features
 │   ├── claim_extraction/
-│   │   ├── __init__.py
-│   │   └── llm_extractor.py   # LLM claim extraction
-│   ├── classifiers/
-│   │   ├── __init__.py
-│   │   ├── baseline.py         # TF-IDF + SVM
-│   │   ├── bilstm.py           # BiLSTM model
-│   │   ├── indobert.py         # IndoBERT model
-│   │   └── trainer.py          # Training utilities
+│   │   └── gemini_extractor.py    # LLM claim extraction + fallback
+│   ├── classifier/
+│   │   ├── lstm_model.py          # BiLSTM model builder
+│   │   ├── train_lstm.py          # Training pipeline
+│   │   └── predict_lstm.py        # CLI inference
 │   ├── evidence/
-│   │   ├── __init__.py
-│   │   ├── retriever.py        # Hybrid BM25 + Semantic
-│   │   ├── indexer.py          # Evidence ingestion
-│   │   └── credibility.py      # Source scoring
+│   │   ├── retriever.py           # Hybrid BM25 + ChromaDB
+│   │   ├── factcheck_api.py       # Google Fact Check API
+│   │   ├── wikipedia_fallback.py  # Tier 4 fallback
+│   │   ├── cache.py               # SQLite cache + RateLimiter
+│   │   ├── indexer.py             # Batch ingestion ke ChromaDB
+│   │   └── source_scoring.py      # Credibility & recency scoring
+│   ├── judge/
+│   │   └── gemini_evidence_judge.py  # LLM evidence judge
 │   ├── fusion/
-│   │   ├── __init__.py
-│   │   ├── llm_judge.py        # LLM evidence analysis
-│   │   ├── scoring.py          # Weighted fusion
-│   │   └── aggregation.py      # Article-level verdict
+│   │   ├── confidence_fusion.py   # REVISED fusion engine ⭐
+│   │   └── aggregation.py         # Weighted article aggregation
+│   ├── data/
+│   │   └── collect.py             # TurnBackHoax scraper
 │   └── api/
-│       ├── __init__.py
-│       ├── main.py             # FastAPI app
-│       └── schemas.py          # Pydantic models
-├── notebooks/
-│   ├── 01_eda.ipynb            # Exploratory data analysis
-│   ├── 02_baseline.ipynb       # Baseline model experiments
-│   ├── 03_bilstm.ipynb         # BiLSTM experiments
-│   ├── 04_indobert.ipynb       # IndoBERT fine-tuning
-│   └── 05_end_to_end.ipynb     # Full pipeline test
-├── tests/
-│   ├── test_preprocessing.py
-│   ├── test_claim_extraction.py
-│   ├── test_classifier.py
-│   ├── test_evidence.py
-│   └── test_fusion.py
+│       ├── main.py                # FastAPI backend + full pipeline
+│       └── schemas.py             # Pydantic schemas
+│
 ├── app/
-│   └── streamlit_app.py        # Streamlit UI
-├── configs/
-│   ├── model_config.yaml       # Hyperparameters
-│   ├── fusion_config.yaml      # Fusion weights
-│   └── slang_dict.json         # Slang normalization
-├── requirements.txt
-├── README.md
-└── ARsitektur.md               # Dokumen ini
+│   └── streamlit_app.py           # Demo UI interaktif
+│
+├── notebooks/
+│   ├── 01_dataset_preparation.ipynb
+│   ├── 02_lstm_training.ipynb
+│   ├── 03_evidence_retrieval_test.ipynb
+│   ├── 04_end_to_end_evaluation.ipynb
+│   └── colab_lstm_training.ipynb  # ⭐ Google Colab notebook
+│
+├── data/
+│   ├── raw/
+│   ├── processed/
+│   ├── training/                  # CSV files for LSTM (hoax + valid only)
+│   ├── evaluation/
+│   └── evidence/                  # ChromaDB + BM25 index
+│
+└── models/
+    └── lstm/                      # lstm_model.keras, tokenizer.pkl, label_map.json
 ```
 
 ---
 
-## 9. API Specification
+## 8. API Specification
 
-### 9.1 Endpoint Utama
+### 8.1 Endpoint Utama
 
 ```
-POST /api/v1/check
+POST /check
 ```
 
 **Request:**
-
 ```json
 {
-  "title": "Vaksin Menyebabkan Gagal Ginjal Massal",
-  "content": "Menurut informasi yang beredar, vaksin yang diberikan pemerintah menyebabkan gagal ginjal massal di Indonesia...",
-  "url": "https://contoh.com/artikel",
-  "source": "user_input"
+  "text": "VIRAL!!! Matcha menyebabkan gagal ginjal!! Sebarkan!",
+  "title": "Bahaya Matcha"
 }
 ```
 
 **Response:**
-
 ```json
 {
-  "status": "success",
-  "data": {
-    "verdict": "Hoax",
-    "confidence": 0.86,
-    "risk_level": "High",
-    "article_summary": "Artikel mengandung klaim yang dibantah oleh sumber kredibel.",
-    "claims": [
-      {
-        "claim_id": 1,
-        "claim_text": "Vaksin menyebabkan gagal ginjal massal",
-        "verdict": "Hoax",
-        "confidence": 0.86,
-        "reasoning": "Klaim dibantah oleh Kemenkes...",
-        "evidence_sources": [
-          { "name": "Kemenkes RI", "url": "https://..." }
-        ]
-      }
-    ],
-    "recommendation": "Informasi ini mengandung klaim yang tidak benar.",
-    "processing_time_ms": 3450
-  }
+  "verdict": "Hoax",
+  "confidence": 0.72,
+  "avg_hoax_score": 0.78,
+  "summary": "Artikel mengandung klaim yang dibantah...",
+  "claims": [...],
+  "claim_stats": {
+    "total_claims": 2,
+    "verifiable_claims": 2,
+    "hoax_claims": 1,
+    "valid_claims": 1,
+    "nei_claims": 0
+  },
+  "processing_time_ms": 3420
 }
 ```
 
-### 9.2 Endpoint Lainnya
+### 8.2 Endpoint Lainnya
 
 ```
-GET  /api/v1/evidence/search?q={query}&limit=5
-     → Cari evidence manual
-
-GET  /api/v1/stats
-     → Statistik sistem (total check, akurasi, dll)
-
-POST /api/v1/feedback
-     → Kirim feedback untuk perbaikan model
-     {
-       "check_id": "...",
-       "correct_verdict": "Tidak Hoax",
-       "reason": "Klaim ini sebenarnya benar karena..."
-     }
+GET  /health          → Health check + component status
+GET  /stats           → System stats (cache, retriever)
+POST /feedback        → Collect human feedback for tuning
 ```
 
 ---
 
-## 10. Design Decisions & Justifikasi
+## 9. Design Decisions & Justifikasi
 
 | Keputusan | Alasan |
 |---|---|
-| **Hybrid bukan single model** | Tidak ada satu model yang sempurna — LSTM lemah di evidence, LLM bisa halusinasi, evidence saja tidak cukup untuk stylistic patterns |
-| **Claim-based bukan article-based** | Hoax detection yang benar itu verifikasi klaim individual, bukan classify seluruh artikel sekaligus |
-| **IndoBERT > BiLSTM sebagai primary** | Transformer terbukti lebih kuat untuk Bahasa Indonesia; BiLSTM tetap sebagai baseline akademis |
-| **3 label bukan 2** | Binary terlalu agresif; "Tidak Cukup Bukti" lebih aman dan ilmiah |
-| **Weighted fusion bukan voting** | Evidence lebih penting dari pattern linguistik — perlu bobot berbeda |
-| **Article verdict = jika 1+ hoax → hoax** | Konservatif — satu klaim salah sudah cukup untuk menandai seluruh artikel |
-| **Hybrid BM25 + Semantic** | BM25 tangkap exact match, semantic tangkap makna — kombinasi lebih robust |
-| **LLM dikunci dengan prompt constraint** | Mencegah halusinasi — LLM hanya boleh pakai evidence yang diberikan |
+| **Hybrid bukan single model** | LSTM lemah di evidence, LLM bisa halusinasi — kombinasi lebih robust |
+| **LSTM > IndoBERT** | Lebih ringan, cocok untuk demo/akademis, cukup akurat dengan data besar |
+| **Binary LSTM (bukan 3-class)** | "Uncertain" bukan pola bahasa — itu keadaan evidence. Lebih clean secara akademis |
+| **Claim-based bukan article-based** | Verifikasi klaim individual lebih akurat daripada classify seluruh artikel |
+| **Evidence quality = confidence multiplier** | Fix bug v1: evidence tidak boleh jadi skor hoax independen |
+| **Regime-based fusion** | Weight adaptive berdasarkan kualitas evidence — bukan static |
+| **Weighted aggregation** | "1 hoax = artikel hoax" terlalu agresif — perlu weight by importance |
+| **Rule-based query generation** | Hemat 30% API calls — tidak perlu LLM untuk generate search query |
+| **Training di Colab** | GPU gratis, 5-10x lebih cepat dari CPU lokal |
+| **LLM dikunci prompt constraint** | Mencegah halusinasi — LLM hanya boleh pakai evidence yang diberikan |
 
 ---
 
-## 11. Risiko & Mitigasi
+## 10. Risiko & Mitigasi
 
 | Risiko | Dampak | Mitigasi |
 |---|---|---|
-| Dataset tidak cukup | Model underfit | Augmentasi data, transfer learning, scraping lebih banyak |
-| Evidence database kosong | Sistem tidak bisa verifikasi | Mulai dari TurnBackHoax (sudah ada), expand bertahap |
-| LLM mahal / rate limit | Biaya operasional tinggi | Cache LLM response, gunakan model kecil (mini), fallback ke local LLM |
-| False positive tinggi | Berita valid salah diklasifikasi | Threshold tuning, feedback loop, human review |
-| Bahasa slang tidak ter-cover | Preprocessing gagal | Perbaiki slang dictionary iteratif, fine-tune dengan data sosial media |
-| Hoax baru yang belum ada di database | Evidence retrieval gagal | Label "Tidak Cukup Bukti", bukan langsung "Hoax" |
+| Dataset tidak cukup | Model underfit | Augmentasi data, scraping lebih banyak, Colab untuk train cepat |
+| Evidence database kosong | Sistem tidak bisa verifikasi | Mulai dari TurnBackHoax, expand bertahap |
+| LLM rate limit / mahal | Biaya operasional | Free tier cukup untuk demo, caching, rule-based query gen |
+| False positive tinggi | Berita valid salah label | Threshold tuning, feedback loop, weighted aggregation |
+| Bahasa slang tidak ter-cover | Preprocessing gagal | 80+ slang dictionary, iteratif perbaiki |
+| Hoax baru belum di database | Evidence retrieval gagal | Label "Tidak Cukup Bukti", bukan langsung "Hoax" |
+| API Gemini down | Claim extraction/judge gagal | Fallback rule-based claim extraction, LSTM-only mode |
+
+---
+
+## 11. Roadmap Implementasi
+
+### Phase 1: Foundation (Weeks 1-2) — MVP CORE
+
+| Task | Est | Why |
+|---|---|---|
+| Data collection pipeline | 3 hari | No data = no LSTM |
+| Text preprocessing module | 2 hari | Dipakai semua downstream |
+| LSTM training (binary) | 4 hari | Core signal |
+| ChromaDB + BM25 setup | 3 hari | Evidence backbone |
+
+### Phase 2: LLM Integration (Weeks 3-4) — HYBRID SYSTEM
+
+| Task | Est | Why |
+|---|---|---|
+| Gemini API integration | 2 hari | Hybrid system enabled |
+| Fusion engine (revised) | 2 hari | Critical bug fix |
+| Evidence caching | 1 hari | Prevents redundant API |
+| Google Fact Check API | 1 hari | Free external evidence |
+
+### Phase 3: Refinement (Weeks 5-6) — QUALITY
+
+| Task | Est | Why |
+|---|---|---|
+| Article weighted aggregation | 2 hari | Replaces broken rule |
+| Evidence conflict detection | 1 hari | Handle contradictory evidence |
+| LSTM linguistic feature fusion | 2 hari | Improve LSTM accuracy |
+
+### Phase 4: UI & Demo (Weeks 7-8) — POLISH
+
+| Task | Est | Why |
+|---|---|---|
+| Streamlit UI | 3 hari | Demo untuk thesis |
+| FastAPI backend | 2 hari | Clean API layer |
+| Feedback endpoint | 1 hari | Show extensibility |
 
 ---
 
 ## 12. Kalimat untuk Paper / Skripsi
 
-> "Penelitian ini mengembangkan sistem deteksi hoaks berbahasa Indonesia berbasis hybrid deep learning dan LLM-assisted fact checking. Model IndoBERT dan BiLSTM digunakan untuk klasifikasi pola linguistik per klaim, sedangkan Large Language Model digunakan untuk ekstraksi klaim dan penjelasan berbasis evidence retrieval. Keputusan final ditentukan melalui weighted decision fusion yang menggabungkan probabilitas model deep learning, skor evidence retrieval, kredibilitas sumber, dan ciri stilistik teks. Sistem ini dirancang untuk mengatasi keterbatasan klasifikasi teks tradisional dengan menambahkan verifikasi berbasis bukti pada setiap klaim yang terdeteksi."
+> "Penelitian ini mengembangkan sistem fact-checking berbahasa Indonesia berbasis hybrid LSTM dan LLM-assisted evidence reasoning. LSTM dengan arsitektur binary (hoax vs valid) digunakan untuk mempelajari pola linguistik dari dataset berlabel, sedangkan LLM (Gemini) digunakan untuk ekstraksi klaim dan reasoning berbasis evidence. Verifikasi klaim dilakukan melalui multi-source evidence retrieval dari Google Fact Check API, local vector database (ChromaDB + BM25), serta Wikipedia sebagai fallback. Keputusan akhir ditentukan melalui confidence fusion adaptif yang menggabungkan probabilitas LSTM, verdict LLM, dan kualitas evidence — di mana evidence quality berfungsi sebagai confidence multiplier, bukan skor hoax independen. Label 'Tidak Cukup Bukti' dihasilkan secara otomatis oleh fusion engine saat evidence tidak ditemukan (evidence_quality = 0), bukan sebagai kelas klasifikasi terpisah. Sistem ini dirancang untuk mengatasi keterbatasan klasifikasi teks tradisional dengan menambahkan verifikasi berbasis bukti pada setiap klaim, dan menghasilkan verdict yang lebih interpretable melalui regime-based fusion."
+
+---
+
+## 13. Quick Commands Reference
+
+```bash
+# === SETUP (sekali saja) ===
+python -m venv venv && venv\Scripts\activate
+pip install -r requirements.txt
+
+# === DATA ===
+python src/data/collect.py              # Scrape TurnBackHoax
+
+# === TRAINING (di Google Colab) ===
+# Upload notebooks/colab_lstm_training.ipynb → Colab
+# Select T4 GPU → Run all → Download model → Extract to models/lstm/
+
+# === EVIDENCE (sekali) ===
+python src/evidence/indexer.py           # Index evidence to ChromaDB
+
+# === JALANKAN ===
+python src/api/main.py                   # Terminal 1: API server
+streamlit run app/streamlit_app.py       # Terminal 2: Demo UI
+
+# === TESTING ===
+python src/fusion/confidence_fusion.py   # Test fusion engine
+python src/preprocessing/cleaning.py     # Test preprocessing
+python src/classifier/predict_lstm.py "text here"  # Test LSTM
+python src/evidence/retriever.py         # Test retrieval
+```

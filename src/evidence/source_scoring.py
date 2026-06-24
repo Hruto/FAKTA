@@ -55,7 +55,7 @@ def get_source_tier(source: str) -> int:
     elif cred >= 0.40:
         return 4
     else:
-        return 3  # Default to tier 3
+        return 4  # Default to tier 4 (lowest credibility)
 
 
 def compute_recency_score(date_str: Optional[str]) -> float:

@@ -6,8 +6,19 @@ BM25 (keyword) + embedding (semantic) search over local evidence database.
 import os
 import json
 import hashlib
+import logging
 from typing import List, Dict, Optional
 from pathlib import Path
+
+# Load .env file
+try:
+    from dotenv import load_dotenv
+    _env_path = Path(__file__).parent.parent.parent / ".env"
+    load_dotenv(dotenv_path=_env_path)
+except ImportError:
+    pass
+
+logger = logging.getLogger(__name__)
 
 
 class HybridRetriever:
@@ -90,9 +101,8 @@ class HybridRetriever:
         self._add_to_bm25(doc_id, text, metadata)
 
     def _add_to_bm25(self, doc_id: str, text: str, metadata: Dict):
-        """Add document to BM25 index."""
+        """Add document to BM25 corpus. BM25 index is rebuilt lazily on search."""
         try:
-            from rank_bm25 import BM25Okapi
             tokens = self._tokenize(text)
             self.bm25_corpus.append(tokens)
             self.bm25_docs.append({
@@ -100,7 +110,8 @@ class HybridRetriever:
                 "text": text,
                 **metadata,
             })
-            self.bm25 = BM25Okapi(self.bm25_corpus)
+            # Invalidate cached BM25 — will be rebuilt on next search
+            self.bm25 = None
         except Exception as e:
             print(f"[Retriever] BM25 add failed: {e}")
 
@@ -151,8 +162,17 @@ class HybridRetriever:
 
     def _bm25_search(self, query: str, top_k: int) -> List[Dict]:
         """BM25 keyword search."""
-        if not self.bm25 or not self.bm25_corpus:
+        if not self.bm25_corpus:
             return []
+
+        # Lazily build BM25 index
+        if self.bm25 is None:
+            try:
+                from rank_bm25 import BM25Okapi
+                self.bm25 = BM25Okapi(self.bm25_corpus)
+            except Exception as e:
+                print(f"[Retriever] BM25 build failed: {e}")
+                return []
 
         try:
             tokens = self._tokenize(query)

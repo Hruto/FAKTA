@@ -5,10 +5,19 @@ Extracts factual claims from article text using Gemini LLM.
 
 import json
 import os
+from pathlib import Path
 from typing import List, Dict, Optional
 from dataclasses import dataclass, asdict
 import hashlib
 import re
+
+# Load .env file
+try:
+    from dotenv import load_dotenv
+    _env_path = Path(__file__).parent.parent.parent / ".env"
+    load_dotenv(dotenv_path=_env_path)
+except ImportError:
+    pass
 
 
 @dataclass
