@@ -1,16 +1,17 @@
 # FAKTA LSTM Training Configuration
 
 # Tokenizer
-max_words: 20000      # Vocabulary size
+max_words: 10000      # Vocabulary size (reduced to prevent overfit)
 max_len: 200          # Maximum sequence length (padding)
 
 # Embedding
-embedding_dim: 128    # Word embedding dimension
+embedding_dim: 64     # Word embedding dimension (reduced from 128)
 
 # LSTM Architecture
-lstm_units: 64        # Number of LSTM units (per layer)
+lstm_units: 32        # Number of LSTM units (reduced from 64)
 use_bidirectional: true
-dropout_rate: 0.3
+num_lstm_layers: 1    # Single BiLSTM layer (reduced from 2)
+dropout_rate: 0.5     # Increased from 0.3
 
 # Training
 epochs: 20

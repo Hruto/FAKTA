@@ -21,11 +21,21 @@ class WikipediaFallback:
         if self._wiki is None:
             try:
                 import wikipediaapi
-                self._wiki = wikipediaapi.Wikipedia(
-                    language=self.language,
-                    extract_format=wikipediaapi.ExtractFormat.WIKITEXT,
-                    user_agent="FAKTA fact-checking system (academic)",
-                )
+                # wikipedia-api >= 0.6.0 removed ExtractFormat enum
+                # and uses language-based constructors directly
+                try:
+                    # New API (>= 0.6.0)
+                    self._wiki = wikipediaapi.Wikipedia(
+                        language=self.language,
+                        user_agent="FAKTA fact-checking system (academic)",
+                    )
+                except TypeError:
+                    # Old API (< 0.6.0) with extract_format parameter
+                    self._wiki = wikipediaapi.Wikipedia(
+                        language=self.language,
+                        extract_format=wikipediaapi.ExtractFormat.WIKITEXT,
+                        user_agent="FAKTA fact-checking system (academic)",
+                    )
             except ImportError:
                 print("[Wikipedia] wikipedia-api not installed, skipping")
                 self._wiki = None

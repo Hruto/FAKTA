@@ -167,8 +167,8 @@ class FAKTAPipeline:
             if claim.claim_type == "opinion":
                 continue
 
-            # LSTM prediction
-            lstm_proba = {"hoax": 0.5, "valid": 0.25, "uncertain": 0.25}
+            # LSTM prediction (binary: hoax vs valid)
+            lstm_proba = {"hoax": 0.5, "valid": 0.5}
             if self._lstm_predictor:
                 lstm_proba = self._lstm_predictor.predict(normalized)
 
@@ -339,4 +339,4 @@ def get_stats():
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000, reload=True)
+    uvicorn.run("src.api.main:app", host="0.0.0.0", port=8000, reload=True)
